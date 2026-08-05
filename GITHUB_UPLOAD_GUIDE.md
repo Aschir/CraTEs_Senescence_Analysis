@@ -37,11 +37,20 @@ After creating the empty GitHub repository, run:
 
 ```bash
 cd /Users/vinzent/craTEs/CraTEs_Senescence_Analysis
-git remote add origin https://github.com/<YOUR_GITHUB_USER>/CraTEs_Senescence_Analysis.git
 git push -u origin main
 ```
 
-Replace `<YOUR_GITHUB_USER>` with your GitHub username.
+The remote is currently configured as:
+
+```text
+https://github.com/Aschir/CraTEs_Senescence_Analysis.git
+```
+
+If you need to change it, run:
+
+```bash
+git remote set-url origin https://github.com/<YOUR_GITHUB_USER>/CraTEs_Senescence_Analysis.git
+```
 
 If you want the commit author to use a different email before pushing, run:
 

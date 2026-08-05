@@ -22,6 +22,7 @@ __pycache__/
 .ipynb_checkpoints/
 
 # Quarto/knitr render artifacts
+.cache/
 .quarto/
 _site/
 *_cache/
@@ -39,6 +40,10 @@ renv/
 data/**
 !data/
 !data/data_acces.md
+!data/Hg19/
+!data/Hg19/README.md
+!data/Hg38/
+!data/Hg38/README.md
 
 # Keep compact result summaries, diagnostics, and figures.
 # Large matrices, mapping caches, reports, and logs should be regenerated.
