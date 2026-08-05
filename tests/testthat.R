@@ -1,0 +1,5 @@
+project_dir <- normalizePath(getwd(), winslash = "/", mustWork = TRUE)
+Sys.setenv(CRATES_TEST_PROJECT_DIR = project_dir)
+old_wd <- setwd(project_dir)
+on.exit(setwd(old_wd), add = TRUE)
+testthat::test_dir(file.path(project_dir, "tests", "testthat"), reporter = "summary")

@@ -66,6 +66,9 @@ results/**
 !results/*/mapping/*.html
 !results/*/mapping/diagnostics/
 !results/*/mapping/diagnostics/*.tsv
+!results/*/exploratory/
+!results/*/exploratory/most_active_te_subfamilies/
+!results/*/exploratory/most_active_te_subfamilies/*.tsv
 
 # GitHub rejects normal Git blobs above 100 MB.
 results/**/target_gene_matrix_*.tsv

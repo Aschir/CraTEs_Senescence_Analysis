@@ -80,6 +80,9 @@ Recommended order:
 2. `notebooks/TE_Seq_craTEs.ipynb`
 3. `notebooks/result_comparison.ipynb`
 
+Exploratory follow-up analyses live under `notebooks/exploratory/` and can be
+run after the main result directories have been generated.
+
 Run `notebooks/paper_mapping_craTEs.R` only when you want the older, more linear mapping/paper-reconstruction script for reference.
 
 ---
@@ -91,11 +94,13 @@ Run `notebooks/paper_mapping_craTEs.R` only when you want the older, more linear
 | Path | Role |
 |---|---|
 | `notebooks/` | Main executable analysis surface. The notebooks are structured as numbered sections with setup, data loading, mapping, preprocessing, activity estimation, contrasts, target matrices and comparison. |
+| `notebooks/exploratory/` | Smaller follow-up notebooks for focused checks that build on the main pipeline outputs. |
 | `scripts/` | Reusable project helpers for mapping, plotting, comparison, trend classification and exports. |
 | `local_craTEs_extension/` | Local drop-in overrides sourced after `library(craTEs)`. These keep the craTEs function names but add hg38 support, stricter checks and clearer diagnostics. |
 | `R/` | Selected upstream craTEs R source files bundled for reproducibility and attribution. |
 | `data/` | Data access notes and local data slots. Raw input files are ignored by Git. |
 | `results/` | Compact result tables, mapping provenance, diagnostics and figures that can be inspected without rerunning everything. Large target-gene matrices are ignored. |
+| `tests/` | Focused `testthat` checks for project helper functions. |
 | `requirements.txt` | Python/Jupyter package snapshot. |
 | `renv.lock` | R/Bioconductor package snapshot. |
 | `LICENSES/` | Third-party license text for bundled upstream craTEs code. |
@@ -107,6 +112,12 @@ Run `notebooks/paper_mapping_craTEs.R` only when you want the older, more linear
 | `CraTEs_LTR5_CRISPR.ipynb` | Validation workflow. It uses the LTR5-Hs CRISPRa/CRISPRi dataset and checks whether VPR shifts activity upward and KRAB shifts activity downward. |
 | `TE_Seq_craTEs.ipynb` | Main senescence workflow. It estimates activity scores and contrasts for `PRO`, `ESEN` and `LSEN`. |
 | `result_comparison.ipynb` | Cross-configuration comparison. It compares result directories, N-matrix choices, activity-score similarity, trend classes, p-value evidence and target matrices. |
+
+### ── Exploratory notebooks ──
+
+| Notebook | When to open it |
+|---|---|
+| `exploratory/most_active_te_subfamilies_senescence.ipynb` | Follow-up ranking for the senescence dataset. It compares the top `3`, `5`, `10`, `20`, `50` and `100` TE subfamilies from inferred craTEs activity against TE expression from `E_TE-Seq_prep_results.tsv`. Expression rows are restricted to `gene_or_te == "repeat"`, repeat-locus IDs are parsed back to TE-subfamily names, expression is averaged per condition, and duplicated TE names are handled with `Max Sum`. Activity is ranked by the default sum of absolute condition mean scores. The overlap prioritises TE subfamilies for promoter-function follow-up beyond the cis-regulatory activity signal. |
 
 ---
 
@@ -306,6 +317,39 @@ result_dirs <- c(
 te_global_top_k <- 10L
 te_ranking_mode <- "activity_change"
 te_ranking_metric <- "sum_step_abs_delta"
+```
+
+### ── Exploratory top TE-subfamily workflow ──
+
+Open `notebooks/exploratory/most_active_te_subfamilies_senescence.ipynb`.
+
+This focused notebook starts from the stored senescence `activity_scores.tsv`
+and asks which TE subfamilies are most active at several fixed list sizes:
+`k = 3, 5, 10, 20, 50, 100`. It compares two rankings:
+
+- inferred craTEs activity, using the sum of absolute mean activity scores
+  across `PRO`, `ESEN` and `LSEN`;
+- TE expression from `E_TE-Seq_prep_results.tsv`, using only rows where
+  `gene_or_te == "repeat"`, parsing repeat locus IDs back to TE-subfamily names,
+  averaging expression across replicates for `PRO`, `ESEN` and `LSEN`, and then
+  resolving duplicated TE-subfamily names with `Max Sum`.
+
+The intersection of both rankings marks TE subfamilies that are strong in the
+cis-regulatory activity model and also active in the TE-expression signal.
+The notebook writes one Top-k file for TE expression, one Top-k file for
+cis-regulatory activity, global and condition-specific intersection tables, and
+the short global top-10 overlap to
+`results/<run>/exploratory/most_active_te_subfamilies/`. Those TE subfamilies
+are exploratory candidates for a follow-up analysis of possible additional
+promoter-related function beyond the cis-regulatory activity inferred by craTEs.
+
+### ── Helper tests ──
+
+The repository includes small `testthat` checks for the exploratory TE-ranking
+helpers. After restoring the R environment, run:
+
+```bash
+Rscript tests/testthat.R
 ```
 
 ### ── Reusing the pipeline for new data ──
