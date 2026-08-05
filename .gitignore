@@ -1,0 +1,64 @@
+# macOS and editor noise
+.DS_Store
+*~
+*.swp
+*.swo
+
+# R session and local project state
+.Rhistory
+.Rapp.history
+.RData
+.RDataTmp
+.Ruserdata
+.Rproj.user/
+
+# Python/Jupyter environments and caches
+.venv/
+venv/
+env/
+jupyter-env/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Quarto/knitr render artifacts
+.quarto/
+_site/
+*_cache/
+*_files/
+*.html
+*.log
+logs/
+log/
+
+# renv library is local; the lockfile is committed.
+renv/
+!renv.lock
+
+# Raw input data are intentionally not versioned.
+data/**
+!data/
+!data/data_acces.md
+
+# Keep compact result summaries, diagnostics, and figures.
+# Large matrices, mapping caches, reports, and logs should be regenerated.
+results/**
+!results/
+!results/*/
+!results/*/figures/
+!results/*/figures/*.pdf
+!results/*/figures/*.png
+!results/*/target_summary.tsv
+!results/*/te_contrast_summary.tsv
+!results/*/*_signif_act.tsv
+!results/*/activity_scores.tsv
+!results/*/activity_fit_summary.tsv
+!results/*/activity_lambda_diagnostics.tsv
+!results/*/sample_activity_diagnostics.tsv
+!results/*/signif_model_diagnostics.tsv
+!results/*/mapping/
+!results/*/mapping/diagnostics/
+!results/*/mapping/diagnostics/*.tsv
+
+# GitHub rejects normal Git blobs above 100 MB.
+results/**/target_gene_matrix_*.tsv

@@ -1,0 +1,997 @@
+---
+title: "craTEs Pipeline Mapping"
+author: "Vinzent Aschir"
+date: "19.06.2026"
+output:
+  html_notebook:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
+  word_document:
+    toc: true
+    toc_depth: '3'
+  html_document:
+    toc: true
+    toc_depth: '3'
+    df_print: paged
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+find_mapping_repo_dir <- function() {
+  input_path <- tryCatch(knitr::current_input(dir = TRUE), error = function(e) NA_character_)
+  if (length(input_path) == 0) {
+    input_path <- NA_character_
+  }
+  input_path <- input_path[[1]]
+  input_dir <- if (!is.na(input_path) && nzchar(input_path)) {
+    dirname(normalizePath(input_path, mustWork = FALSE))
+  } else {
+    getwd()
+  }
+  candidates <- unique(c(
+    Sys.getenv("CRATES_REPO_DIR", unset = NA_character_),
+    getwd(),
+    file.path(getwd(), ".."),
+    input_dir,
+    file.path(input_dir, "..")
+  ))
+  candidates <- candidates[!is.na(candidates) & nzchar(candidates)]
+  candidates <- unique(normalizePath(candidates, mustWork = FALSE))
+  hits <- candidates[
+    file.exists(file.path(candidates, "scripts", "craTEs_own_function.R")) &
+      file.exists(file.path(candidates, "scripts", "own_mapping_f.R"))
+  ]
+  if (length(hits) == 0) {
+    stop("Could not locate the craTEs repository root for mapping sources.", call. = FALSE)
+  }
+  normalizePath(hits[[1]], mustWork = TRUE)
+}
+
+repo_dir <- find_mapping_repo_dir()
+knitr::opts_knit$set(root.dir = repo_dir)
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  root.dir = repo_dir,
+  comment = "#>"
+)
+
+announce_mapping_step <- function(step) {
+  cat(step, "\n", sep = "", file = stderr())
+  flush.console()
+}
+
+announce_mapping_detail <- function(detail) {
+  cat("  ", detail, "\n", sep = "", file = stderr())
+  flush.console()
+}
+```
+
+# Mapping cache overview
+
+This Rmd contains the gene ID mapping procedure that is run from `CraTEs_paper.ipynb`.
+When `--e-gene-names` and `--n-gene-names` are provided, the mapping cache is built for those notebook-selected inputs.
+When no command-line arguments are given, the report falls back to the original craTEs VPR/KRAB paper inputs.
+
+The mapping itself is structured: `BioMart` first, then `org.Hs.eg.db`, then `mygene`, followed by final diagnostics and cache writing.
+
+The default behavior preserves the current notebook result: the first BioMart mapping uses the current Ensembl release.
+For hg19/GRCh37 analyses, pass `--primary-mart grch37` so BioMart mapping and biotype annotation use the GRCh37 endpoint.
+For hg38/current analyses, Ensembl v80 is still available as a final biotype fallback where old paper-style annotation is useful.
+
+```{r script-arguments-and-inputs}
+announce_mapping_step("[1/7] Loading E and N inputs")
+
+local_r_cache <- file.path(repo_dir, ".cache", "R")
+dir.create(local_r_cache, showWarnings = FALSE, recursive = TRUE)
+Sys.setenv(R_USER_CACHE_DIR = normalizePath(local_r_cache, mustWork = TRUE))
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(ggplot2)
+  library(ggtext)
+  library(biomaRt)
+  library(org.Hs.eg.db)
+  library(mygene)
+})
+
+source(file.path(repo_dir, "scripts", "craTEs_own_function.R"))
+source(file.path(repo_dir, "scripts", "own_mapping_f.R"))
+
+default_e_path <- file.path(repo_dir, "data/Hg19/E_VPR-KRAB_CraTEs.txt.gz")
+default_n_path <- file.path(repo_dir, "data/Hg19/N_c_100_Hg19_craTEs.tsv")
+
+mapping_inputs <- prepare_mapping_inputs(
+  commandArgs(trailingOnly = TRUE),
+  default_e_path = default_e_path,
+  default_n_path = default_n_path
+)
+
+e_gene_names_path <- mapping_inputs$e_gene_names_path
+n_gene_names_path <- mapping_inputs$n_gene_names_path
+mapping_cache_path <- mapping_inputs$mapping_cache_path
+mapping_report_path <- derive_report_path(mapping_cache_path)
+mapping_status_started_at <- format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
+mapping_status_started_at_epoch <- as.numeric(Sys.time())
+primary_mart <- mapping_inputs$primary_mart
+mapping_reference_genome <- mapping_inputs$mapping_reference_genome
+mirror <- mapping_inputs$mirror
+gene_ids <- mapping_inputs$gene_ids
+genes_N <- mapping_inputs$genes_N
+
+write_mapping_status(
+  mapping_cache_path,
+  status = "running",
+  stage = "[1/7] Loading E and N inputs",
+  message = "Mapping rebuild started.",
+  report_path = mapping_report_path,
+  started_at = mapping_status_started_at,
+  started_at_epoch = mapping_status_started_at_epoch
+)
+
+default_error_hook <- knitr::knit_hooks$get("error")
+knitr::knit_hooks$set(error = function(x, options) {
+  if (exists("mapping_cache_path", inherits = TRUE)) {
+    existing_status <- read_mapping_status(mapping_cache_path)
+    existing_state <- if (!is.null(existing_status) && "status" %in% names(existing_status)) {
+      unname(as.character(existing_status[["status"]][1]))
+    } else {
+      NA_character_
+    }
+
+    if (!isTRUE(existing_state == "failed")) {
+      write_mapping_status(
+        mapping_cache_path,
+        status = "failed",
+        stage = paste0("chunk: ", options$label),
+        message = paste(as.character(x), collapse = "\n"),
+        report_path = if (exists("mapping_report_path", inherits = TRUE)) mapping_report_path else NA_character_,
+        started_at = if (exists("mapping_status_started_at", inherits = TRUE)) mapping_status_started_at else NULL,
+        started_at_epoch = if (exists("mapping_status_started_at_epoch", inherits = TRUE)) mapping_status_started_at_epoch else NULL
+      )
+    }
+  }
+  default_error_hook(x, options)
+})
+
+cat(sprintf("Using default inputs: %s\n", mapping_inputs$default_inputs))
+cat(sprintf("E source: %s\n", mapping_inputs$e_source_path))
+cat(sprintf("N source: %s\n", mapping_inputs$n_source_path))
+cat(sprintf("E gene-name TSV: %s\n", e_gene_names_path))
+cat(sprintf("N gene-name TSV: %s\n", n_gene_names_path))
+cat(sprintf("E genes: %d\n", length(gene_ids)))
+cat(sprintf("N genes: %d\n", length(genes_N)))
+cat(sprintf("Primary mart: %s\n", primary_mart))
+cat(sprintf("Mapping reference genome: %s\n", mapping_reference_genome))
+cat(sprintf("Mirror: %s\n", mirror))
+cat(sprintf("Output cache: %s\n", mapping_cache_path))
+cat(sprintf("Status file: %s\n", derive_status_path(mapping_cache_path)))
+```
+
+------------------------------------------------------------------------
+
+## 3 · Gene ID to ENSEML Mapping
+
+Normally, E stores HGNC gene symbols, while N is indexed by Ensembl gene IDs.
+Three successive mapping rounds are used to map Gene IDs to ENSEMBL numbers and assign biotypes:
+
+0.  Extract already raw ENSEMBL IDs present in the naming and add them to the mapping.
+
+1\.
+`BioMart` — primary source, also yields biotypes
+
+2\.
+`org.Hs.eg.db` — rescues symbols BioMart could not resolve
+
+3\.
+`mygene` — last-resort rescue for the remaining unmapped symbols.
+
+After all three rounds, this script writes a cached mapping table that the notebook can load before converting E rows to Ensembl IDs.
+
+```{r mapping-biomart}
+announce_mapping_step("[2/7] Extracting gene identifiers")
+write_mapping_status(
+  mapping_cache_path,
+  status = "running",
+  stage = "[2/7] Extracting gene identifiers",
+  message = "Checking extracted E and N gene identifiers.",
+  report_path = mapping_report_path,
+  started_at = mapping_status_started_at,
+  started_at_epoch = mapping_status_started_at_epoch
+)
+stopifnot(length(gene_ids) > 0, length(genes_N) > 0)
+```
+
+### ── 3.0. Pre-mapping: extracting possible excisting Ensembl IDs ──
+
+Raw Ensembl IDs already present in `gene_ids` are preserved before the primary BioMart mapping step.
+This avoids re-resolving existing `ENSG...` identifiers as HGNC symbols and keeps the mapping chain consistent for mixed input namespaces.
+Their biotype is still recovered from BioMart, org.Hs.eg.db with BioMart biotype fallback, and MyGene, but this annotation does not change their `mapping_source`: raw Ensembl IDs remain marked as `pre_mapped`.
+
+```{r mapping-biomart-pre}
+raw_ensembl_ids <- unique(gene_ids[grepl("^ENSG[0-9]+$", gene_ids)])
+pre_mapped <- if (length(raw_ensembl_ids) > 0) {
+  announce_mapping_detail(sprintf(
+    "Pre-mapping %d raw Ensembl IDs before BioMart mapping.",
+    length(raw_ensembl_ids)
+  ))
+  data.frame(
+    hgnc_symbol     = raw_ensembl_ids,
+    ensembl_gene_id = raw_ensembl_ids,
+    gene_biotype    = NA_character_,
+    stringsAsFactors = FALSE
+  )
+} else {
+  data.frame(
+    hgnc_symbol     = character(),
+    ensembl_gene_id = character(),
+    gene_biotype    = character(),
+    stringsAsFactors = FALSE
+  )
+}
+```
+
+### ── 3.1. Mapping with BioMart / current Ensembl ──
+
+The first BioMart query uses the current Ensembl release to preserve the behavior of the current notebook.
+The old Ensembl v80 mart is still initialised because rescued IDs are first checked there for biotype annotation, keeping the paper-recreation context visible without making v80 the primary mapping source.
+
+```{r mapping-biomart-main}
+announce_mapping_step("[3/7] Running BioMart mapping")
+write_mapping_status(
+  mapping_cache_path,
+  status = "running",
+  stage = "[3/7] Running BioMart mapping",
+  message = "Querying BioMart for primary HGNC-to-Ensembl mapping.",
+  report_path = mapping_report_path,
+  started_at = mapping_status_started_at,
+  started_at_epoch = mapping_status_started_at_epoch
+)
+
+# ──  Mapping BioMart (reference-aware primary with hg38-only fallback) ─────
+# mart_primary: selected reference mapping source, current Ensembl by default
+# mart_current/mart_v80: hg38-only fallback for IDs assigned by org.Hs.eg.db/mygene
+uses_grch37_mart <- identical(mapping_reference_genome, "Hg19")
+mart_primary <- tryCatch(
+  make_ensembl_mart(primary_mart, mirror),
+  error = function(e) {
+    announce_mapping_detail(sprintf(
+      "Primary BioMart '%s' is unavailable: %s",
+      primary_mart,
+      conditionMessage(e)
+    ))
+    NULL
+  }
+)
+mart_current <- if (isTRUE(uses_grch37_mart)) {
+  NULL
+} else if (tolower(primary_mart) %in% c("current", "latest") && !is.null(mart_primary)) {
+  mart_primary
+} else {
+  tryCatch(
+    use_ensembl_with_mirror_fallback(mirror = mirror),
+    error = function(e) {
+      announce_mapping_detail(sprintf(
+        "Current Ensembl BioMart is unavailable: %s",
+        conditionMessage(e)
+      ))
+      NULL
+    }
+  )
+}
+if (is.null(mart_primary) && !isTRUE(uses_grch37_mart) && !is.null(mart_current)) {
+  announce_mapping_detail("Using current Ensembl BioMart as the primary mapping source for this run.")
+  mart_primary <- mart_current
+}
+if (is.null(mart_primary)) {
+  announce_mapping_detail("BioMart primary mapping is unavailable; continuing with pre-mapped IDs, OrgDb, and MyGene.")
+}
+mart_v80 <- NULL
+mart_v80_unavailable <- FALSE
+get_mart_v80 <- function() {
+  if (isTRUE(mart_v80_unavailable)) {
+    return(NULL)
+  }
+  if (is.null(mart_v80)) {
+    mart_v80 <<- tryCatch(
+      use_ensembl_with_mirror_fallback(mirror = mirror, version = 80),
+      error = function(e) {
+        mart_v80_unavailable <<- TRUE
+        announce_mapping_detail(sprintf(
+          "Skipping Ensembl v80 BioMart fallback for this run: %s",
+          conditionMessage(e)
+        ))
+        NULL
+      }
+    )
+  }
+  mart_v80
+}
+
+recover_biomart_biotypes_reference <- function(ensembl_ids, include_symbol = FALSE) {
+  reference <- recover_biomart_biotypes(
+    ensembl_ids,
+    mart_first = mart_primary,
+    include_symbol = include_symbol
+  )
+  missing_from_reference <- unique(as.character(ensembl_ids))
+  missing_from_reference <- missing_from_reference[
+    !is.na(missing_from_reference) &
+      missing_from_reference != "" &
+      !missing_from_reference %in% reference$ensembl_gene_id
+  ]
+
+  if (isTRUE(uses_grch37_mart) || length(missing_from_reference) == 0) {
+    return(reference %>% distinct(ensembl_gene_id, .keep_all = TRUE))
+  }
+
+  current <- recover_biomart_biotypes(
+    missing_from_reference,
+    mart_first = mart_current,
+    include_symbol = include_symbol
+  )
+  missing_from_current <- missing_from_reference[
+    !missing_from_reference %in% current$ensembl_gene_id
+  ]
+  v80 <- if (length(missing_from_current) > 0) {
+    recover_biomart_biotypes(
+      missing_from_current,
+      mart_first = get_mart_v80(),
+      include_symbol = include_symbol
+    )
+  } else {
+    empty_biomart_biotype_table(include_symbol = include_symbol)
+  }
+  bind_rows(reference, current, v80) %>%
+    distinct(ensembl_gene_id, .keep_all = TRUE)
+}
+
+# Raw Ensembl IDs are already mapped by identity. The database calls below only
+# annotate their biotype; they must not change mapping_source away from pre_mapped.
+pre_mapped_biomart <- recover_biomart_biotypes_reference(
+  raw_ensembl_ids,
+  include_symbol = TRUE
+) %>%
+  mutate(annotation_source = "biomart")
+
+pre_mapped_orgdb_symbols <- if (length(raw_ensembl_ids) > 0) {
+  AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys = raw_ensembl_ids,
+    columns = c("SYMBOL"),
+    keytype = "ENSEMBL"
+  ) %>%
+    as.data.frame(stringsAsFactors = FALSE) %>%
+    transmute(
+      ensembl_gene_id = as.character(ENSEMBL),
+      hgnc_symbol = as.character(SYMBOL)
+    ) %>%
+    filter(!is.na(ensembl_gene_id), ensembl_gene_id != "")
+} else {
+  data.frame(
+    ensembl_gene_id = character(),
+    hgnc_symbol = character(),
+    stringsAsFactors = FALSE
+  )
+}
+
+pre_mapped_orgdb <- if (nrow(pre_mapped_orgdb_symbols) > 0) {
+  pre_mapped_biomart %>%
+    dplyr::select(ensembl_gene_id, gene_biotype) %>%
+    left_join(
+      pre_mapped_orgdb_symbols %>% distinct(ensembl_gene_id, .keep_all = TRUE),
+      by = "ensembl_gene_id"
+    ) %>%
+    mutate(annotation_source = "orgdb")
+} else {
+  data.frame(
+    ensembl_gene_id = character(),
+    gene_biotype = character(),
+    hgnc_symbol = character(),
+    annotation_source = character(),
+    stringsAsFactors = FALSE
+  )
+}
+
+pre_mapped_ids_with_biotype <- unique(c(
+  pre_mapped_biomart$ensembl_gene_id[
+    !is.na(pre_mapped_biomart$gene_biotype) & pre_mapped_biomart$gene_biotype != ""
+  ],
+  pre_mapped_orgdb$ensembl_gene_id[
+    !is.na(pre_mapped_orgdb$gene_biotype) & pre_mapped_orgdb$gene_biotype != ""
+  ]
+))
+pre_mapped_ids_for_mygene <- raw_ensembl_ids[
+  !raw_ensembl_ids %in% pre_mapped_ids_with_biotype
+]
+
+pre_mapped_mygene_raw <- if (length(pre_mapped_ids_for_mygene) > 0) {
+  mygene_chunks <- split(
+    pre_mapped_ids_for_mygene,
+    ceiling(seq_along(pre_mapped_ids_for_mygene) / 500)
+  )
+  bind_rows(lapply(mygene_chunks, function(ids) {
+    as.data.frame(mygene::queryMany(
+      ids,
+      scopes = "ensembl.gene",
+      fields = c("symbol", "name", "ensembl.gene", "type_of_gene"),
+      species = "human"
+    ))
+  }))
+} else {
+  data.frame()
+}
+
+pre_mapped_mygene_df <- as.data.frame(pre_mapped_mygene_raw)
+if (nrow(pre_mapped_mygene_df) > 0 && !"symbol" %in% colnames(pre_mapped_mygene_df)) {
+  pre_mapped_mygene_df$symbol <- NA_character_
+}
+
+pre_mapped_mygene <- if (
+  nrow(pre_mapped_mygene_df) > 0 &&
+  all(c("query", "type_of_gene") %in% colnames(pre_mapped_mygene_df))
+) {
+  pre_mapped_mygene_df %>%
+    transmute(
+      ensembl_gene_id = as.character(query),
+      hgnc_symbol = as.character(symbol),
+      gene_biotype = gsub("-", "_", as.character(type_of_gene)),
+      annotation_source = "mygene"
+    ) %>%
+    filter(
+      !is.na(ensembl_gene_id),
+      ensembl_gene_id != "",
+      !is.na(gene_biotype),
+      gene_biotype != ""
+    )
+} else {
+  data.frame(
+    ensembl_gene_id = character(),
+    hgnc_symbol = character(),
+    gene_biotype = character(),
+    annotation_source = character(),
+    stringsAsFactors = FALSE
+  )
+}
+
+pre_mapped_biotype_candidates <- bind_rows(
+  pre_mapped_biomart,
+  pre_mapped_orgdb,
+  pre_mapped_mygene
+) %>%
+  filter(!is.na(gene_biotype), gene_biotype != "") %>%
+  mutate(annotation_priority = match(annotation_source, c("biomart", "orgdb", "mygene"))) %>%
+  arrange(annotation_priority) %>%
+  distinct(ensembl_gene_id, .keep_all = TRUE)
+
+pre_mapped <- data.frame(
+  hgnc_symbol = raw_ensembl_ids,
+  ensembl_gene_id = raw_ensembl_ids,
+  stringsAsFactors = FALSE
+) %>%
+  left_join(
+    pre_mapped_biotype_candidates %>%
+      dplyr::select(ensembl_gene_id, gene_biotype),
+    by = "ensembl_gene_id"
+  )
+
+# First mapping in E: Gene IDs -> Ensembl IDs
+map_1 <- bind_rows(
+  pre_mapped,
+  query_biomart_symbols(gene_ids, mart_primary)
+) %>%
+  distinct(hgnc_symbol, ensembl_gene_id, gene_biotype)
+```
+
+#### Deduplication & Mapping bijectivity
+
+When a symbol maps to multiple Ensembl IDs, `smart_dedup_mapping()` prefers IDs that are present in N and not already claimed in the E matrix.
+This keeps the mapping closer to the N matrix that will later be used for activity inference, while avoiding unnecessary duplicate Ensembl assignments.
+
+```{r mapping-biomart-smart-dedup}
+# Smart assignment of GeneIds that map to multiple Ensembl IDs:
+# prefer assignments occurring in N and avoid assigning an Ensembl ID twice.
+map_biomart <- smart_dedup_mapping(
+  map_df         = map_1,
+  already_mapped = character(0),
+  N_genes        = genes_N
+)
+
+already_mapped <- unname(map_biomart[!is.na(map_biomart)])
+unmapped_after_biomart <- gene_ids[is.na(map_biomart[gene_ids])]
+
+mapping_source <- setNames(rep("unmapped", length(gene_ids)), gene_ids)
+biomart_mapped_keys <- setdiff(names(map_biomart[!is.na(map_biomart)]), raw_ensembl_ids)
+mapping_source[biomart_mapped_keys] <- "biomart"
+mapping_source[raw_ensembl_ids] <- "pre_mapped"
+```
+
+#### Biotype diagnostics
+
+When inspecting the intersect between E and N it remains to be considered that duplicates arised through the mapping are not filtered yet as well as biotypes.
+
+```{r mapping-biomart-diagnostics}
+sprintf(
+  "%d of %d genes (%.2f%%) could not be mapped after BioMart",
+  length(unmapped_after_biomart),
+  length(gene_ids),
+  100 * length(unmapped_after_biomart) / length(gene_ids)
+)
+
+display_intersect(
+  already_mapped,
+  genes_N,
+  name_E = "E",
+  name_N = "N",
+  title  = "Gene overlap after BioMart"
+)
+
+duplicate_stats(already_mapped)
+```
+
+#### Biotype distribution (BioMart)
+
+The database is also queried for the biotype of the Gene IDs.
+This plot checks whether the first mapping round is dominated by protein-coding genes, as expected before the rescue steps.
+This statistics represent rather a relative quantification of mapping improvment throughout the databases.
+
+```{r mapping-biomart-biotype-distribution}
+plot_mapping_distribution(
+  map_1,
+  category_col = "gene_biotype",
+  highlight    = "protein_coding",
+  heading      = "Gene first mapped with biotype from primary BioMart",
+  n_thres      = 2
+)
+
+# Accumulate biotype annotations from all mapping sources in this table.
+biotype_combined <- map_1 %>%
+  dplyr::select(ensembl_gene_id, gene_biotype)
+```
+
+The first mapping round is dominated by protein-coding genes.
+The remaining unmapped symbols are passed to static annotation rescue, where some older or non-standard symbols can still be recovered.
+
+### 3.2. ── Mapping rescue with org.Hs.eg.db ──
+
+Rescues symbols that BioMart did not map by using the more static database `org.Hs.eg.db`.
+The smart `multiVals` picker is an equivalent of `smart_dedup_mapping()` for this database-specific interface.
+
+The amount of unmapped genes is too high after the first mapping only, and some gene symbols are easier to rescue from the annotation database than from the archived Ensembl query.
+Because `org.Hs.eg.db` does not provide the biotype here, the rescued Ensembl IDs are sent back through BioMart only for `gene_biotype` annotation.
+
+```{r mapping-orgdb}
+announce_mapping_step("[4/7] Running OrgDb fallback mapping")
+write_mapping_status(
+  mapping_cache_path,
+  status = "running",
+  stage = "[4/7] Running OrgDb fallback mapping",
+  message = "Running org.Hs.eg.db fallback mapping for symbols not resolved by BioMart.",
+  report_path = mapping_report_path,
+  started_at = mapping_status_started_at,
+  started_at_epoch = mapping_status_started_at_epoch
+)
+
+# ── Mapping org.Hs.eg.db  ──────────────────────────────
+smart_pick <- make_smart_pick(already_mapped, genes_N)
+
+map_orgdb <- if (length(unmapped_after_biomart) > 0) {
+  AnnotationDbi::mapIds(
+    org.Hs.eg.db,
+    keys      = unmapped_after_biomart,
+    column    = "ENSEMBL",
+    keytype   = "SYMBOL",
+    multiVals = smart_pick
+  )
+} else {
+  setNames(character(), character())
+}
+
+# problem: does not contain biotype
+```
+
+#### ── Biotype fallback for org.Hs.eg.db-rescued IDs ──
+
+```{r mapping-orgdb-biotype-fallback}
+# ── Biotype fallback for biotyping orgdb-rescued Ensembl IDs ─────────
+new_ensembl_from_orgdb <- unname(map_orgdb[!is.na(map_orgdb)])
+
+biotype_orgdb_recovered <- recover_biomart_biotypes_reference(new_ensembl_from_orgdb)
+
+sprintf(
+  "%d orgdb IDs recovered by Ensembl biotype lookup, %d permanently unresolved",
+  nrow(biotype_orgdb_recovered),
+  length(unique(new_ensembl_from_orgdb)) - nrow(biotype_orgdb_recovered)
+)
+
+new_biotypes_orgdb <- biotype_orgdb_recovered %>%
+  filter(!ensembl_gene_id %in% biotype_combined$ensembl_gene_id)
+
+biotype_combined <- bind_rows(
+  biotype_combined,
+  new_biotypes_orgdb
+) %>%
+  distinct(ensembl_gene_id, gene_biotype)
+
+if (nrow(new_biotypes_orgdb) > 0) {
+  plot_mapping_distribution(
+    new_biotypes_orgdb,
+    category_col = "gene_biotype",
+    highlight    = "protein_coding",
+    heading      = "Biotype of genes rescued by org.Hs.eg.db"
+  )
+} else {
+  cat("No new org.Hs.eg.db biotypes to plot.\n")
+}
+```
+
+#### ── Combine BioMart + org.Hs.eg.db ──
+
+```{r mapping-orgdb-combine}
+# Combine mappings: begin with BioMart and fill the remaining mappings
+# with org.Hs.eg.db results.
+map_combined <- map_biomart
+
+missing_keys <- names(map_orgdb[!is.na(map_orgdb)])
+map_combined[missing_keys] <- map_orgdb[missing_keys]
+mapping_source[missing_keys] <- "orgdb"
+```
+
+#### ── Second Mapping diagnostics (org.Hs.eg.db rescue) ──
+
+```{r mapping-orgdb-diagnostics}
+unmapped_after_orgdb <- gene_ids[is.na(map_combined[gene_ids])]
+
+sprintf(
+  "%d of %d genes (%.2f%%) could not be mapped after org.Hs.eg.db",
+  length(unmapped_after_orgdb),
+  length(gene_ids),
+  100 * length(unmapped_after_orgdb) / length(gene_ids)
+)
+
+display_intersect(
+  unname(map_combined[!is.na(map_combined)]),
+  genes_N,
+  name_E = "E",
+  name_N = "N",
+  title  = "Gene overlap after second mapping"
+)
+
+duplicate_stats(unname(map_combined[!is.na(map_combined)]))
+```
+
+We could improve the amount of intersecting gene names and assign additional protein-coded genes.
+The remaining unmapped symbols are now passed to `mygene`, which is broader but also more dependent on a live web service.
+
+### 3.3. Mapping rescue with mygene
+
+The third mapping is used to finally catch specific nc-RNA out of the remaining unmapped, that is known to interact particularly with TEs.
+Additionally, biotype for unmapped proteins is queried and assigned, for continuous filter downstream.
+We use again a smart assignment to minimise the amount of duplicates arising through mapping.
+
+```{r mapping-mygene}
+announce_mapping_step("[5/7] Running MyGene fallback mapping")
+write_mapping_status(
+  mapping_cache_path,
+  status = "running",
+  stage = "[5/7] Running MyGene fallback mapping",
+  message = "Querying MyGene for the remaining unresolved symbols.",
+  report_path = mapping_report_path,
+  started_at = mapping_status_started_at,
+  started_at_epoch = mapping_status_started_at_epoch
+)
+
+# ── Mapping mygene ──────────────────────────────
+if (length(unmapped_after_orgdb) > 0) {
+  map_mygene_raw <- mygene::queryMany(
+    unmapped_after_orgdb,
+    scopes  = c("symbol", "entrezgene", "alias"),
+    fields  = c("symbol", "name", "ensembl.gene", "type_of_gene"),
+    species = "human"
+  )
+  
+  map_mygene_df <- as.data.frame(map_mygene_raw)
+  
+  map_3_df <- data.frame(
+    hgnc_symbol     = map_mygene_df$query,
+    ensembl_gene_id = sapply(map_mygene_df$ensembl, extract_ensembl),
+    gene_biotype    = gsub("-", "_", as.character(map_mygene_df$type_of_gene)),
+    stringsAsFactors = FALSE
+  ) %>%
+    filter(!is.na(ensembl_gene_id))
+  
+  # since the order of assigned Ensembl id is representing the likelihood we
+  # could also take always the first one and remain independent of N.
+  map_mygene <- smart_dedup_mapping(
+    map_df         = map_3_df,
+    already_mapped = unname(map_combined[!is.na(map_combined)]),
+    N_genes        = genes_N
+  )
+} else {
+  map_mygene_df <- data.frame(type_of_gene = character())
+  map_3_df <- data.frame(
+    hgnc_symbol     = character(),
+    ensembl_gene_id = character(),
+    gene_biotype    = character(),
+    stringsAsFactors = FALSE
+  )
+  map_mygene <- setNames(character(), character())
+}
+```
+
+#### ── Biotype fallback for mygene-rescued IDs ──
+
+```{r mapping-mygene-biotype-fallback}
+# ── Add mygene biotypes to biotype_combined ───────────────
+successfully_mapped <- map_mygene[!is.na(map_mygene)]
+
+new_biotypes_mygene <- data.frame(
+  hgnc_symbol     = names(successfully_mapped),
+  ensembl_gene_id = unname(successfully_mapped),
+  stringsAsFactors = FALSE
+) %>%
+  left_join(
+    map_3_df %>%
+      dplyr::select(hgnc_symbol, ensembl_gene_id, gene_biotype),
+    by = c("hgnc_symbol", "ensembl_gene_id")
+  ) %>%
+  filter(
+    !ensembl_gene_id %in% biotype_combined$ensembl_gene_id,
+    !is.na(gene_biotype),
+    gene_biotype != ""
+  ) %>%
+  dplyr::select(ensembl_gene_id, gene_biotype)
+
+biotype_combined <- bind_rows(
+  biotype_combined,
+  new_biotypes_mygene
+) %>%
+  distinct(ensembl_gene_id, gene_biotype)
+```
+
+#### ── Third Mapping diagnostics (mygene rescue) ──
+
+##### Biotype distribution (mygene)
+
+```{r mapping-mygene-biotype-distribution}
+if (nrow(map_mygene_df) > 0 && "type_of_gene" %in% colnames(map_mygene_df)) {
+  plot_mapping_distribution(
+    map_mygene_df,
+    category_col = "type_of_gene",
+    highlight    = "protein-coding",
+    heading      = "MyGene: type distribution of remaining unmapped genes"
+  )
+} else {
+  cat("No mygene rescue candidates to plot.\n")
+}
+```
+
+#### ── Add mygene mapping to final mapping ──
+
+```{r mapping-mygene-combine}
+mygene_mapped_keys <- names(map_mygene[!is.na(map_mygene)])
+map_combined[mygene_mapped_keys] <- map_mygene[mygene_mapped_keys]
+mapping_source[mygene_mapped_keys] <- "mygene"
+```
+
+#### ── Reverse Mapping ──
+
+The reverse mapping `ensembl_to_symbol` is created here because later target-gene tables are easier to read with HGNC symbols.
+It is not written as a separate file; the notebook reconstructs it from the cached TSV when needed.
+
+```{r mapping-reverse}
+# Reverse mapping: Ensembl ID -> HGNC symbol
+mapped_only <- map_combined[!is.na(map_combined)]
+ensembl_to_symbol <- setNames(names(mapped_only), unname(mapped_only))
+```
+
+### ── 3.4 - Final Mapping Diagnostics ──
+
+```{r mapping-final-diagnostics}
+unmapped_final <- gene_ids[is.na(map_combined[gene_ids])]
+
+sprintf(
+  "%d of %d genes (%.2f%%) could not be mapped",
+  length(unmapped_final),
+  length(gene_ids),
+  100 * length(unmapped_final) / length(gene_ids)
+)
+
+display_intersect(
+  unname(map_combined[!is.na(map_combined)]),
+  genes_N,
+  name_E = "E",
+  name_N = "N",
+  title  = "Gene overlap after all mappings"
+)
+
+duplicate_stats(unname(map_combined[!is.na(map_combined)]))
+```
+
+#### ─── Final biotype distribution across all three mappings ───
+
+```{r mapping-final-biotype-distribution}
+plot_mapping_distribution(
+  biotype_combined,
+  category_col = "gene_biotype",
+  highlight    = "protein_coding",
+  heading      = "All mappings combined: Biotype distribution",
+  n_thres      = 3
+)
+```
+
+### ── 3.5 - Cache mapping output ──
+
+The final object written by this Rmd is a TSV with one row per E gene.
+It records the selected Ensembl ID, the biotype, the mapping source that supplied the final assignment, and whether the mapped Ensembl ID is present in N.
+This is the only file consumed by the notebook during normal cached execution.
+
+```{r mapping-cache-table}
+announce_mapping_step("[6/7] Building unified mapping table")
+write_mapping_status(
+  mapping_cache_path,
+  status = "running",
+  stage = "[6/7] Building unified mapping table",
+  message = "Combining BioMart, OrgDb, and MyGene results into the final cache table.",
+  report_path = mapping_report_path,
+  started_at = mapping_status_started_at,
+  started_at_epoch = mapping_status_started_at_epoch
+)
+
+mapping_table <- data.table(
+  hgnc_symbol     = gene_ids,
+  ensembl_gene_id = unname(map_combined[gene_ids])
+)
+
+mapping_table[, mapping_source := unname(mapping_source[hgnc_symbol])]
+mapping_table[is.na(ensembl_gene_id), mapping_source := "unmapped"]
+
+biotype_lookup <- biotype_combined %>%
+  filter(!is.na(ensembl_gene_id), ensembl_gene_id != "") %>%
+  distinct(ensembl_gene_id, .keep_all = TRUE) %>%
+  data.table()
+
+mapping_table[, gene_biotype := biotype_lookup$gene_biotype[
+  match(ensembl_gene_id, biotype_lookup$ensembl_gene_id)
+]]
+
+setcolorder(
+  mapping_table,
+  c("hgnc_symbol", "ensembl_gene_id", "gene_biotype", "mapping_source")
+)
+
+mapping_table[, in_N := !is.na(ensembl_gene_id) & ensembl_gene_id %in% genes_N]
+mapping_table[is.na(mapping_source), mapping_source := "unmapped"]
+mapping_table[, primary_mart := primary_mart]
+mapping_table[, mapping_reference_genome := mapping_reference_genome]
+
+allowed_sources <- c("pre_mapped", "biomart", "orgdb", "mygene", "unmapped")
+if (!all(mapping_table$mapping_source %in% allowed_sources)) {
+  stop("Unexpected mapping_source value detected.", call. = FALSE)
+}
+
+mapping_table
+```
+
+#### ── Cache diagnostics ──
+
+```{r mapping-cache-diagnostics}
+diagnostics_dir <- file.path(dirname(mapping_cache_path), "diagnostics")
+dir.create(diagnostics_dir, showWarnings = FALSE, recursive = TRUE)
+
+source_counts <- mapping_table[
+  ,
+  .N,
+  by = mapping_source
+][order(match(mapping_source, c("pre_mapped", "biomart", "orgdb", "mygene", "unmapped")))]
+
+biotype_counts <- mapping_table[
+  !is.na(gene_biotype) & gene_biotype != "",
+  .N,
+  by = gene_biotype
+][order(-N)]
+
+data.table::fwrite(
+  source_counts,
+  file.path(diagnostics_dir, "mapping_source_counts.tsv"),
+  sep = "\t"
+)
+data.table::fwrite(
+  biotype_counts,
+  file.path(diagnostics_dir, "gene_biotype_counts.tsv"),
+  sep = "\t"
+)
+data.table::fwrite(
+  mapping_table[mapping_source == "unmapped"],
+  file.path(diagnostics_dir, "unmapped_genes.tsv"),
+  sep = "\t"
+)
+
+source_counts
+biotype_counts
+```
+
+```{r mapping-cache-source-plot}
+ggplot2::ggplot(
+  source_counts,
+  ggplot2::aes(x = mapping_source, y = N, fill = mapping_source)
+) +
+  ggplot2::geom_col(show.legend = FALSE) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::labs(
+    title = "Mapping source counts",
+    x = "Mapping source",
+    y = "# E genes"
+  )
+```
+
+#### ── Write mapping cache ──
+
+The TSV is written only after all mapping and diagnostic steps succeeded.
+It is first written to a temporary file and then moved into the final cache path, so a failed server-dependent rebuild does not corrupt an existing usable cache.
+The rendered report is kept next to the mapping cache as the provenance record for the mapping run.
+After a successful write, temporary gene-name inputs and the rebuild status file are removed to keep the mapping folder focused on reusable outputs.
+
+```{r mapping-cache-write}
+announce_mapping_step("[7/7] Writing mapping cache and diagnostics")
+existing_status <- read_mapping_status(mapping_cache_path)
+existing_state <- if (!is.null(existing_status) && "status" %in% names(existing_status)) {
+  unname(as.character(existing_status[["status"]][1]))
+} else {
+  NA_character_
+}
+if (!is.null(existing_status) && isTRUE(existing_state == "failed")) {
+  previous_stage <- if ("stage" %in% names(existing_status)) {
+    unname(as.character(existing_status[["stage"]][1]))
+  } else {
+    "an earlier chunk"
+  }
+  stop(
+    paste("Mapping rebuild failed earlier at", previous_stage, "and the cache was not written."),
+    call. = FALSE
+  )
+}
+
+write_mapping_status(
+  mapping_cache_path,
+  status = "running",
+  stage = "[7/7] Writing mapping cache and diagnostics",
+  message = "Writing diagnostics and the final mapping cache.",
+  report_path = mapping_report_path,
+  started_at = mapping_status_started_at,
+  started_at_epoch = mapping_status_started_at_epoch
+)
+
+write_cache_atomically(mapping_table, mapping_cache_path)
+
+write_mapping_status(
+  mapping_cache_path,
+  status = "complete",
+  stage = "[7/7] Complete",
+  message = "Mapping cache written successfully.",
+  report_path = mapping_report_path,
+  started_at = mapping_status_started_at,
+  started_at_epoch = mapping_status_started_at_epoch
+)
+
+cleanup_mapping_transient_files(
+  mapping_cache_path = mapping_cache_path,
+  e_gene_names_path = e_gene_names_path,
+  n_gene_names_path = n_gene_names_path
+)
+
+announce_mapping_detail(sprintf("Mapping cache written: %s", mapping_cache_path))
+announce_mapping_detail(sprintf("Diagnostics written: %s", diagnostics_dir))
+announce_mapping_detail("Transient mapping files removed after successful cache write.")
+```
