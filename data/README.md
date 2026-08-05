@@ -20,9 +20,6 @@ data/
     `-- N_w_2.5e5_Hg38_craTEs.tsv
 ```
 
-The spelling `Senescene` is preserved because the notebooks and existing result
-directories already use that file stem.
-
 ## Hg19: LTR5-Hs CRISPRa/CRISPRi Validation Data
 
 These files are used mainly in `notebooks/CraTEs_LTR5_CRISPR.ipynb` and, for
