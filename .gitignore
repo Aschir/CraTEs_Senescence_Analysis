@@ -39,14 +39,14 @@ renv/
 # Raw input data are intentionally not versioned.
 data/**
 !data/
-!data/data_acces.md
+!data/README.md
 !data/Hg19/
-!data/Hg19/README.md
+!data/Hg19/.gitkeep
 !data/Hg38/
-!data/Hg38/README.md
+!data/Hg38/.gitkeep
 
-# Keep compact result summaries, diagnostics, and figures.
-# Large matrices, mapping caches, reports, and logs should be regenerated.
+# Keep compact result summaries, mapping provenance, diagnostics, and figures.
+# Large target matrices and run logs should be regenerated or archived externally.
 results/**
 !results/
 !results/*/
@@ -62,6 +62,8 @@ results/**
 !results/*/sample_activity_diagnostics.tsv
 !results/*/signif_model_diagnostics.tsv
 !results/*/mapping/
+!results/*/mapping/*.tsv
+!results/*/mapping/*.html
 !results/*/mapping/diagnostics/
 !results/*/mapping/diagnostics/*.tsv
 

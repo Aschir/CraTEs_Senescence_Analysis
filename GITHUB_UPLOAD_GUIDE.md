@@ -97,4 +97,15 @@ access notes are ready to be public.
 Normal GitHub rejects files larger than 100 MB. The large
 `target_gene_matrix_*.tsv` files are therefore ignored. If you need to publish
 them, use Git LFS or archive them externally and link them from
-`data/data_acces.md` or the README.
+`data/README.md` or the README.
+
+The compact mapping provenance files are meant to be uploaded:
+
+- `results/*/mapping/E_*_gene_names.tsv`
+- `results/*/mapping/N_*_gene_names.tsv`
+- `results/*/mapping/map_*.tsv`
+- `results/*/mapping/report_*.html`
+- `results/*/mapping/diagnostics/*.tsv`
+
+These files keep the notebook runs reproducible without requiring every fresh
+checkout to rebuild BioMart/MyGene mappings immediately.
